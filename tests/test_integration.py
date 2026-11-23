@@ -1,10 +1,173 @@
 import jwt
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine
 
+from app import database
 from app.config import get_settings
+from app.main import app
+from app.models.application import Application
+from app.models.listing import Listing
+from app.models.user import User
 from app.repositories.user import UserRepository
+from app.services import applications, board_auth
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
-from app.utilities.security import verify_password
+from app.utilities.security import create_access_token, verify_password
+
+
+@pytest.fixture
+def transition_api(monkeypatch):
+    test_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(test_engine)
+    monkeypatch.setattr(database, "engine", test_engine)
+    monkeypatch.setattr(applications, "engine", test_engine)
+    monkeypatch.setattr(board_auth, "engine", test_engine)
+
+    def get_test_session():
+        with Session(test_engine) as session:
+            yield session
+
+    previous_overrides = app.dependency_overrides.copy()
+    app.dependency_overrides[database.get_session] = get_test_session
+    client = TestClient(app)
+
+    with Session(test_engine) as session:
+        users = {
+            "owner": User(
+                username="owner",
+                email="owner@example.com",
+                password="unused",
+                role="employer",
+            ),
+            "other_employer": User(
+                username="other-employer",
+                email="other@example.com",
+                password="unused",
+                role="employer",
+            ),
+            "graduate": User(
+                username="graduate",
+                email="graduate@example.com",
+                password="unused",
+                role="graduate",
+            ),
+            "admin": User(
+                username="admin",
+                email="admin@example.com",
+                password="unused",
+                role="admin",
+            ),
+        }
+        session.add_all(users.values())
+        session.commit()
+        for user in users.values():
+            session.refresh(user)
+
+        listing = Listing(
+            employer_id=users["owner"].id,
+            title="Quality Engineer",
+            company="Example Co",
+            description="Test listing",
+            apply_mode="collect",
+            deadline="2099-12-31",
+            status="published",
+        )
+        session.add(listing)
+        session.commit()
+        session.refresh(listing)
+
+        application = Application(
+            listing_id=listing.id,
+            graduate_id=users["graduate"].id,
+            cover_letter="Test application",
+            resume_text="Test resume",
+            status="submitted",
+        )
+        session.add(application)
+        session.commit()
+        session.refresh(application)
+
+        test_data = {
+            "application_id": application.id,
+            "users": {name: user.id for name, user in users.items()},
+            "engine": test_engine,
+        }
+
+    try:
+        yield client, test_data
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)
+        SQLModel.metadata.drop_all(test_engine)
+        test_engine.dispose()
+
+
+def _authenticate_as(client: TestClient, user_id: int) -> None:
+    client.cookies.set(
+        "access_token",
+        create_access_token({"sub": str(user_id), "role": "test"}),
+    )
+
+
+def _application_status(engine, application_id: int) -> str:
+    with Session(engine) as session:
+        application = session.get(Application, application_id)
+        assert application is not None
+        return application.status
+
+
+def test_listing_owner_can_transition_and_change_is_persisted(transition_api):
+    client, data = transition_api
+    _authenticate_as(client, data["users"]["owner"])
+
+    response = client.post(
+        f"/api/applications/{data['application_id']}/transition",
+        json={"action": "mark_reviewed"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["application"]["status"] == "reviewed"
+    assert _application_status(data["engine"], data["application_id"]) == "reviewed"
+
+
+@pytest.mark.parametrize("role", ["other_employer", "graduate", "admin"])
+def test_non_owner_or_non_employer_cannot_transition(transition_api, role):
+    client, data = transition_api
+    _authenticate_as(client, data["users"][role])
+
+    response = client.post(
+        f"/api/applications/{data['application_id']}/transition",
+        json={
+            "action": "mark_reviewed",
+            "actor_id": data["users"]["owner"],
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "forbidden"
+    assert _application_status(data["engine"], data["application_id"]) == "submitted"
+
+
+def test_unauthenticated_user_cannot_transition(transition_api):
+    client, data = transition_api
+
+    response = client.post(
+        f"/api/applications/{data['application_id']}/transition",
+        json={
+            "action": "mark_reviewed",
+            "actor_id": data["users"]["owner"],
+        },
+    )
+
+    assert response.status_code == 401
+    assert _application_status(data["engine"], data["application_id"]) == "submitted"
 
 
 def test_save_password(test_session):

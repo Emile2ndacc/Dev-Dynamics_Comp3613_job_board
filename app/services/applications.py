@@ -101,12 +101,8 @@ def export_applicants(admin_id: int, listing_id: int) -> dict[str, Any]:
 def transition_application(
     actor_id: int, application_id: int, action: str
 ) -> dict[str, Any]:
-    """Drive the poorly factored lifecycle module."""
     actor = get_user(actor_id)
-    if not actor:
-        return {"ok": False, "error": "unknown user"}
-    # DEFECT: admin may transition; any employer may transition any application
-    if actor["role"] not in {"employer", "admin"}:
+    if not actor or actor["role"] != "employer":
         return {"ok": False, "error": "forbidden"}
     if action not in ACTIONS:
         return {"ok": False, "error": f"action must be one of {ACTIONS}"}
@@ -115,6 +111,12 @@ def transition_application(
         row = session.get(Application, application_id)
         if row is None:
             return {"ok": False, "error": "application not found"}
+
+        listing = session.get(Listing, row.listing_id)
+        if listing is None:
+            return {"ok": False, "error": "listing not found"}
+        if listing.employer_id != actor_id:
+            return {"ok": False, "error": "forbidden"}
 
         result = apply_action(row.model_dump(), action)
         if not result.get("ok"):
