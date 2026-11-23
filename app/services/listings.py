@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from sqlmodel import Session, select
@@ -19,7 +20,8 @@ def subscribe(graduate_id: int) -> dict[str, Any]:
     user = get_user(graduate_id)
     if not user or user["role"] != "graduate":
         return {"ok": False, "error": "graduates only"}
-    # DEFECT: no programme eligibility check
+    if user.get("programme") not in ELIGIBLE_PROGRAMMES:
+        return {"ok": False, "error": "DCIT graduates only"}
     with Session(engine) as session:
         existing = session.exec(
             select(Subscription).where(Subscription.graduate_id == graduate_id)
@@ -32,9 +34,19 @@ def subscribe(graduate_id: int) -> dict[str, Any]:
 
 def list_jobs_for_graduates() -> list[dict[str, Any]]:
     with Session(engine) as session:
-        # DEFECT: returns pending + expired listings
         rows = session.exec(select(Listing).order_by(Listing.id)).all()
-        return [r.model_dump() for r in rows]
+        today = date.today()
+        published = []
+        for listing in rows:
+            if listing.status != "published":
+                continue
+            try:
+                deadline = date.fromisoformat(listing.deadline)
+            except (TypeError, ValueError):
+                continue
+            if deadline >= today:
+                published.append(listing.model_dump())
+        return published
 
 
 def list_pending_for_admin() -> list[dict[str, Any]]:
@@ -62,8 +74,7 @@ def submit_listing(
     if apply_mode == "external" and not external_url:
         return {"ok": False, "error": "external_url required"}
 
-    # DEFECT: published immediately (skip pending/admin)
-    status = "published"
+    status = "pending"
     with Session(engine) as session:
         listing = Listing(
             employer_id=employer_id,
@@ -89,11 +100,19 @@ def publish_listing(admin_id: int, listing_id: int) -> dict[str, Any]:
         listing = session.get(Listing, listing_id)
         if listing is None:
             return {"ok": False, "error": "listing not found"}
+        if listing.status != "pending":
+            return {"ok": False, "error": "only pending listings can be published"}
         listing.status = "published"
         session.add(listing)
         session.commit()
-    # DEFECT: publish does not notify subscribers
-    return {"ok": True, "notified": False}
+        session.refresh(listing)
+
+    notification_result = notify_subscribers(admin_id, listing_id)
+    return {
+        "ok": True,
+        "notified": notification_result.get("ok", False),
+        "count": notification_result.get("count", 0),
+    }
 
 
 def notify_subscribers(admin_id: int, listing_id: int) -> dict[str, Any]:
