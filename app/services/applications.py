@@ -52,7 +52,11 @@ def apply(
         }
 
 
-def my_applications(graduate_id: int) -> list[dict[str, Any]]:
+def my_applications(graduate_id: int) -> dict[str, Any]:
+    graduate = get_user(graduate_id)
+    if not graduate or graduate["role"] != "graduate":
+        return {"ok": False, "error": "forbidden"}
+
     with Session(engine) as session:
         rows = session.exec(
             select(Application)
@@ -66,19 +70,18 @@ def my_applications(graduate_id: int) -> list[dict[str, Any]]:
             view = dict(app)
             view["status"] = derived_status_from_flags(app)
             results.append(view)
-        return results
+        return {"ok": True, "applications": results}
 
 
 def listing_applicants(viewer_id: int, listing_id: int) -> dict[str, Any]:
     viewer = get_user(viewer_id)
-    if not viewer:
-        return {"ok": False, "error": "unknown user"}
+    if not viewer or viewer["role"] != "employer":
+        return {"ok": False, "error": "forbidden"}
     with Session(engine) as session:
         listing = session.get(Listing, listing_id)
         if listing is None:
             return {"ok": False, "error": "listing not found"}
-        # DEFECT (IDOR): ownership not checked for employers
-        if viewer["role"] not in {"employer", "admin"}:
+        if listing.employer_id != viewer_id:
             return {"ok": False, "error": "forbidden"}
         rows = session.exec(
             select(Application)
@@ -92,10 +95,20 @@ def export_applicants(admin_id: int, listing_id: int) -> dict[str, Any]:
     admin = get_user(admin_id)
     if not admin or admin["role"] != "admin":
         return {"ok": False, "error": "admin only"}
-    result = listing_applicants(admin_id, listing_id)
-    if not result.get("ok"):
-        return result
-    return {"ok": True, "format": "json", "package": result["applicants"]}
+    with Session(engine) as session:
+        listing = session.get(Listing, listing_id)
+        if listing is None:
+            return {"ok": False, "error": "listing not found"}
+        rows = session.exec(
+            select(Application)
+            .where(Application.listing_id == listing_id)
+            .order_by(Application.id)
+        ).all()
+        return {
+            "ok": True,
+            "format": "json",
+            "package": [row.model_dump() for row in rows],
+        }
 
 
 def transition_application(

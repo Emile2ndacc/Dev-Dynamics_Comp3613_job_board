@@ -94,6 +94,7 @@ def transition_api(monkeypatch):
         session.refresh(application)
 
         test_data = {
+            "listing_id": listing.id,
             "application_id": application.id,
             "users": {name: user.id for name, user in users.items()},
             "engine": test_engine,
@@ -168,6 +169,141 @@ def test_unauthenticated_user_cannot_transition(transition_api):
 
     assert response.status_code == 401
     assert _application_status(data["engine"], data["application_id"]) == "submitted"
+
+
+def test_listing_owner_can_access_applicants(transition_api):
+    client, data = transition_api
+    _authenticate_as(client, data["users"]["owner"])
+
+    response = client.get(
+        f"/api/listings/{data['listing_id']}/applicants",
+    )
+
+    assert response.status_code == 200
+    applicants = response.json()["applicants"]
+    assert len(applicants) == 1
+    assert applicants[0]["cover_letter"] == "Test application"
+    assert applicants[0]["resume_text"] == "Test resume"
+
+
+@pytest.mark.parametrize("role", ["other_employer", "graduate", "admin"])
+def test_non_owner_or_non_employer_cannot_access_applicants(
+    transition_api, role
+):
+    client, data = transition_api
+    _authenticate_as(client, data["users"][role])
+
+    response = client.get(
+        f"/api/listings/{data['listing_id']}/applicants",
+        params={"actor_id": data["users"]["owner"]},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "forbidden"
+    assert "Test application" not in response.text
+    assert "Test resume" not in response.text
+
+
+def test_unauthenticated_user_cannot_access_applicants(transition_api):
+    client, data = transition_api
+
+    response = client.get(
+        f"/api/listings/{data['listing_id']}/applicants",
+        params={"actor_id": data["users"]["owner"]},
+    )
+
+    assert response.status_code == 401
+    assert "Test application" not in response.text
+    assert "Test resume" not in response.text
+
+
+def test_graduate_can_only_access_their_own_applications(transition_api):
+    client, data = transition_api
+    graduate_id = data["users"]["graduate"]
+    _authenticate_as(client, graduate_id)
+
+    response = client.get(
+        "/api/graduates/applications",
+        params={"actor_id": data["users"]["admin"]},
+    )
+
+    assert response.status_code == 200
+    user_applications = response.json()["applications"]
+    assert len(user_applications) == 1
+    assert user_applications[0]["graduate_id"] == graduate_id
+    assert user_applications[0]["resume_text"] == "Test resume"
+
+
+@pytest.mark.parametrize("role", ["owner", "other_employer", "admin"])
+def test_non_graduate_cannot_access_graduate_applications(transition_api, role):
+    client, data = transition_api
+    _authenticate_as(client, data["users"][role])
+
+    response = client.get(
+        "/api/graduates/applications",
+        params={"actor_id": data["users"]["graduate"]},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "forbidden"
+    assert "Test application" not in response.text
+    assert "Test resume" not in response.text
+
+
+def test_unauthenticated_user_cannot_access_graduate_applications(transition_api):
+    client, data = transition_api
+
+    response = client.get(
+        "/api/graduates/applications",
+        params={"actor_id": data["users"]["graduate"]},
+    )
+
+    assert response.status_code == 401
+    assert "Test application" not in response.text
+    assert "Test resume" not in response.text
+
+
+def test_admin_can_export_applicants(transition_api):
+    client, data = transition_api
+    _authenticate_as(client, data["users"]["admin"])
+
+    response = client.get(
+        f"/api/admin/listings/{data['listing_id']}/export",
+        params={"actor_id": data["users"]["owner"]},
+    )
+
+    assert response.status_code == 200
+    package = response.json()["package"]
+    assert len(package) == 1
+    assert package[0]["resume_text"] == "Test resume"
+
+
+@pytest.mark.parametrize("role", ["owner", "other_employer", "graduate"])
+def test_non_admin_cannot_export_applicants(transition_api, role):
+    client, data = transition_api
+    _authenticate_as(client, data["users"][role])
+
+    response = client.get(
+        f"/api/admin/listings/{data['listing_id']}/export",
+        params={"actor_id": data["users"]["admin"]},
+    )
+
+    assert response.status_code == 403
+    assert "Test application" not in response.text
+    assert "Test resume" not in response.text
+
+
+def test_unauthenticated_user_cannot_export_applicants(transition_api):
+    client, data = transition_api
+
+    response = client.get(
+        f"/api/admin/listings/{data['listing_id']}/export",
+        params={"actor_id": data["users"]["admin"]},
+    )
+
+    assert response.status_code == 401
+    assert "Test application" not in response.text
+    assert "Test resume" not in response.text
 
 
 def test_save_password(test_session):
