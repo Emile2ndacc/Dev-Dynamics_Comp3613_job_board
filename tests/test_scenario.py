@@ -3,12 +3,13 @@
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from app.main import app
-from app.seed import seed
 from app.database import engine
+from app.main import app
 from app.models.application import Application
 from app.models.listing import Listing
 from app.models.user import User
+from app.seed import seed
+from app.utilities.security import create_access_token
 
 
 def setup_module() -> None:
@@ -60,6 +61,13 @@ def login_user(email: str) -> dict:
     return response.json()["user"]
 
 
+def authenticate_user(user: dict) -> None:
+    client.cookies.set(
+        "access_token",
+        create_access_token({"sub": str(user["id"]), "role": user["role"]}),
+    )
+
+
 def get_seeded_application() -> Application:
     with Session(engine) as session:
         application = session.exec(select(Application)).first()
@@ -107,24 +115,25 @@ def test_owner_can_run_full_application_lifecycle():
     application = get_seeded_application()
     reset_application(application.id)
     employer = login_user("employer@example.com")
+    authenticate_user(employer)
 
     reviewed = client.post(
         f"/api/applications/{application.id}/transition",
-        json={"actor_id": employer["id"], "action": "mark_reviewed"},
+        json={"action": "mark_reviewed"},
     )
     assert reviewed.status_code == 200
     assert reviewed.json()["application"]["status"] == "reviewed"
 
     shortlisted = client.post(
         f"/api/applications/{application.id}/transition",
-        json={"actor_id": employer["id"], "action": "shortlist"},
+        json={"action": "shortlist"},
     )
     assert shortlisted.status_code == 200
     assert shortlisted.json()["application"]["status"] == "shortlisted"
 
     hired = client.post(
         f"/api/applications/{application.id}/transition",
-        json={"actor_id": employer["id"], "action": "hire"},
+        json={"action": "hire"},
     )
     assert hired.status_code == 200
     assert hired.json()["application"]["status"] == "hired"
@@ -134,27 +143,29 @@ def test_another_employer_cannot_transition_application():
     application = get_seeded_application()
     reset_application(application.id)
     employer2 = login_user("employer2@example.com")
+    authenticate_user(employer2)
 
     response = client.post(
         f"/api/applications/{application.id}/transition",
-        json={"actor_id": employer2["id"], "action": "mark_reviewed"},
+        json={"action": "mark_reviewed"},
     )
 
-    assert response.status_code == 400
-    assert "listing employer" in response.json()["detail"]
+    assert response.status_code == 403
+    assert response.json()["detail"] == "forbidden"
 
 
 def test_admin_cannot_transition_application():
     application = get_seeded_application()
     reset_application(application.id)
     admin = login_user("admin@example.com")
+    authenticate_user(admin)
 
     response = client.post(
         f"/api/applications/{application.id}/transition",
-        json={"actor_id": admin["id"], "action": "mark_reviewed"},
+        json={"action": "mark_reviewed"},
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 403
     assert response.json()["detail"] == "forbidden"
 
 
@@ -162,10 +173,11 @@ def test_invalid_jump_is_rejected():
     application = get_seeded_application()
     reset_application(application.id)
     employer = login_user("employer@example.com")
+    authenticate_user(employer)
 
     response = client.post(
         f"/api/applications/{application.id}/transition",
-        json={"actor_id": employer["id"], "action": "hire"},
+        json={"action": "hire"},
     )
 
     assert response.status_code == 400
@@ -176,10 +188,11 @@ def test_rejection_is_rejected_before_shortlisting():
     application = get_seeded_application()
     reset_application(application.id)
     employer = login_user("employer@example.com")
+    authenticate_user(employer)
 
     response = client.post(
         f"/api/applications/{application.id}/transition",
-        json={"actor_id": employer["id"], "action": "reject"},
+        json={"action": "reject"},
     )
 
     assert response.status_code == 400
@@ -190,10 +203,11 @@ def test_owner_can_reject_shortlisted_application():
     application = get_seeded_application()
     reset_application(application.id, status="shortlisted")
     employer = login_user("employer@example.com")
+    authenticate_user(employer)
 
     response = client.post(
         f"/api/applications/{application.id}/transition",
-        json={"actor_id": employer["id"], "action": "reject"},
+        json={"action": "reject"},
     )
 
     assert response.status_code == 200
@@ -206,10 +220,11 @@ def test_hired_application_is_terminal():
     application = get_seeded_application()
     reset_application(application.id, status="hired")
     employer = login_user("employer@example.com")
+    authenticate_user(employer)
 
     response = client.post(
         f"/api/applications/{application.id}/transition",
-        json={"actor_id": employer["id"], "action": "reopen"},
+        json={"action": "reopen"},
     )
 
     assert response.status_code == 400
@@ -276,6 +291,7 @@ def test_external_listing_cannot_collect_on_platform_application():
 def test_other_employer_cannot_view_listing_applicants():
     application = get_seeded_application()
     employer2 = login_user("employer2@example.com")
+    authenticate_user(employer2)
 
     with Session(engine) as session:
         listing = session.get(Listing, application.listing_id)
@@ -283,8 +299,7 @@ def test_other_employer_cannot_view_listing_applicants():
 
     response = client.get(
         f"/api/listings/{listing_id}/applicants",
-        params={"actor_id": employer2["id"]},
     )
 
     assert response.status_code == 403
-    assert "listing employer" in response.json()["detail"]
+    assert response.json()["detail"] == "forbidden"
