@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from sqlmodel import Session, select
@@ -9,8 +10,9 @@ from sqlmodel import Session, select
 from app.database import engine
 from app.models.application import Application
 from app.models.listing import Listing
+from app.services.application_service import ApplicationService
 from app.services.board_auth import get_user
-from app.services.lifecycle import ACTIONS, apply_action, derived_status_from_flags
+from app.services.lifecycle import ACTIONS
 
 
 def apply(
@@ -22,14 +24,22 @@ def apply(
     user = get_user(graduate_id)
     if not user or user["role"] != "graduate":
         return {"ok": False, "error": "graduates only"}
-    # DEFECT: no programme eligibility check
+    if user.get("programme") not in {"DCIT"}:
+        return {"ok": False, "error": "DCIT graduates only"}
 
     with Session(engine) as session:
         listing = session.get(Listing, listing_id)
         if listing is None:
             return {"ok": False, "error": "listing not found"}
-
-        # DEFECT: allows apply on pending / expired; external still creates a row
+        if listing.status != "published":
+            return {"ok": False, "error": "listing is not published"}
+        if listing.apply_mode != "collect":
+            return {"ok": False, "error": "listing uses an external application link"}
+        try:
+            if date.fromisoformat(listing.deadline) < date.today():
+                return {"ok": False, "error": "listing deadline has passed"}
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "listing has an invalid deadline"}
         resume = resume_text or user.get("resume_text") or ""
         application = Application(
             listing_id=listing_id,
@@ -37,10 +47,6 @@ def apply(
             cover_letter=cover_letter,
             resume_text=resume,
             status="submitted",
-            flag_reviewed=0,
-            flag_shortlisted=0,
-            flag_rejected=0,
-            flag_hired=0,
         )
         session.add(application)
         session.commit()
@@ -62,9 +68,9 @@ def my_applications(graduate_id: int) -> list[dict[str, Any]]:
         results = []
         for row in rows:
             app = row.model_dump()
-            # DEFECT: graduate view sometimes uses flag-derived status, not column
             view = dict(app)
-            view["status"] = derived_status_from_flags(app)
+            # Use canonical status only
+            view["status"] = app["status"]
             results.append(view)
         return results
 
@@ -77,9 +83,13 @@ def listing_applicants(viewer_id: int, listing_id: int) -> dict[str, Any]:
         listing = session.get(Listing, listing_id)
         if listing is None:
             return {"ok": False, "error": "listing not found"}
-        # DEFECT (IDOR): ownership not checked for employers
         if viewer["role"] not in {"employer", "admin"}:
             return {"ok": False, "error": "forbidden"}
+        if viewer["role"] == "employer" and listing.employer_id != viewer_id:
+            return {
+                "ok": False,
+                "error": "only the listing employer may view applicants",
+            }
         rows = session.exec(
             select(Application)
             .where(Application.listing_id == listing_id)
@@ -102,39 +112,42 @@ def transition_application(
     actor_id: int, application_id: int, action: str
 ) -> dict[str, Any]:
     actor = get_user(actor_id)
-    if not actor or actor["role"] != "employer":
+    if not actor:
+        return {"ok": False, "error": "unknown user"}
+    if actor["role"] != "employer":
         return {"ok": False, "error": "forbidden"}
     if action not in ACTIONS:
         return {"ok": False, "error": f"action must be one of {ACTIONS}"}
 
     with Session(engine) as session:
-        row = session.get(Application, application_id)
-        if row is None:
+        app = session.get(Application, application_id)
+        if not app:
             return {"ok": False, "error": "application not found"}
-
-        listing = session.get(Listing, row.listing_id)
+        listing = session.get(Listing, app.listing_id)
         if listing is None:
             return {"ok": False, "error": "listing not found"}
         if listing.employer_id != actor_id:
             return {"ok": False, "error": "forbidden"}
 
-        result = apply_action(row.model_dump(), action)
-        if not result.get("ok"):
-            return result
-        if not result.get("changed"):
-            return {
-                "ok": True,
-                "application": result["application"],
-                "changed": False,
-            }
+    service = ApplicationService(app)
+    try:
+        if action == "mark_reviewed":
+            service.review(actor)
+        elif action == "shortlist":
+            service.shortlist(actor)
+        elif action == "reject":
+            service.reject(actor)
+        elif action == "hire":
+            service.hire(actor)
+        elif action == "reopen":
+            service.reopen(actor)
 
-        updated = result["row"]
-        row.status = updated["status"]
-        row.flag_reviewed = updated["flag_reviewed"]
-        row.flag_shortlisted = updated["flag_shortlisted"]
-        row.flag_rejected = updated["flag_rejected"]
-        row.flag_hired = updated["flag_hired"]
-        session.add(row)
-        session.commit()
-        session.refresh(row)
-        return {"ok": True, "application": row.model_dump(), "changed": True}
+        return {
+            "ok": True,
+            "application": app.model_dump(),
+            "changed": True,
+        }
+    except PermissionError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": f"invalid action: {str(e)}"}

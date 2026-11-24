@@ -11,7 +11,7 @@ from app.models.application import Application
 from app.models.listing import Listing
 from app.models.user import User
 from app.repositories.user import UserRepository
-from app.services import applications, board_auth
+from app.services import application_service, applications, board_auth
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
 from app.utilities.security import create_access_token, verify_password
@@ -26,6 +26,7 @@ def transition_api(monkeypatch):
     )
     SQLModel.metadata.create_all(test_engine)
     monkeypatch.setattr(database, "engine", test_engine)
+    monkeypatch.setattr(application_service, "engine", test_engine)
     monkeypatch.setattr(applications, "engine", test_engine)
     monkeypatch.setattr(board_auth, "engine", test_engine)
 
