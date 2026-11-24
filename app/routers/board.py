@@ -118,23 +118,43 @@ def apply(body: ApplyBody) -> dict[str, Any]:
 
 
 @router.get("/graduates/applications")
-def my_apps(actor_id: int) -> dict[str, Any]:
-    return {"applications": applications.my_applications(actor_id)}
+def my_apps(actor: AuthDep) -> dict[str, Any]:
+    if actor.id is None:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+
+    result = applications.my_applications(actor.id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=403, detail=result.get("error"))
+    return {"applications": result["applications"]}
 
 
 @router.get("/listings/{listing_id}/applicants")
-def applicants(listing_id: int, actor_id: int) -> dict[str, Any]:
-    result = applications.listing_applicants(actor_id, listing_id)
+def applicants(listing_id: int, actor: AuthDep) -> dict[str, Any]:
+    if actor.id is None:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+
+    result = applications.listing_applicants(actor.id, listing_id)
     if not result.get("ok"):
-        raise HTTPException(status_code=403, detail=result.get("error"))
+        error = result.get("error")
+        if error == "forbidden":
+            raise HTTPException(status_code=403, detail=error)
+        if error == "listing not found":
+            raise HTTPException(status_code=404, detail=error)
+        raise HTTPException(status_code=400, detail=error)
     return result
 
 
 @router.get("/admin/listings/{listing_id}/export")
-def export(listing_id: int, actor_id: int) -> dict[str, Any]:
-    result = applications.export_applicants(actor_id, listing_id)
+def export(listing_id: int, actor: AuthDep) -> dict[str, Any]:
+    if actor.id is None:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+
+    result = applications.export_applicants(actor.id, listing_id)
     if not result.get("ok"):
-        raise HTTPException(status_code=403, detail=result.get("error"))
+        error = result.get("error")
+        if error == "listing not found":
+            raise HTTPException(status_code=404, detail=error)
+        raise HTTPException(status_code=403, detail=error)
     return result
 
 

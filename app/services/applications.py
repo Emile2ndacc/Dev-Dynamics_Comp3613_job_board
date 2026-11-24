@@ -88,10 +88,7 @@ def listing_applicants(viewer_id: int, listing_id: int) -> dict[str, Any]:
         if listing is None:
             return {"ok": False, "error": "listing not found"}
         if listing.employer_id != viewer_id:
-            return {
-                "ok": False,
-                "error": "only the listing employer may view applicants",
-            }
+            return {"ok": False, "error": "forbidden"}
         rows = session.exec(
             select(Application)
             .where(Application.listing_id == listing_id)

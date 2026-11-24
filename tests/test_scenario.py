@@ -291,6 +291,7 @@ def test_external_listing_cannot_collect_on_platform_application():
 def test_other_employer_cannot_view_listing_applicants():
     application = get_seeded_application()
     employer2 = login_user("employer2@example.com")
+    authenticate_user(employer2)
 
     with Session(engine) as session:
         listing = session.get(Listing, application.listing_id)
@@ -298,8 +299,7 @@ def test_other_employer_cannot_view_listing_applicants():
 
     response = client.get(
         f"/api/listings/{listing_id}/applicants",
-        params={"actor_id": employer2["id"]},
     )
 
     assert response.status_code == 403
-    assert "listing employer" in response.json()["detail"]
+    assert response.json()["detail"] == "forbidden"
